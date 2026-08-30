@@ -1,0 +1,54 @@
+# Cursor rules — Immich Home Media Server (macOS)
+
+Полный контекст: см. CLAUDE.md в корне. Кратко:
+
+## Стек
+Immich (официальные образы ghcr.io/immich-app/*, тег release) + Docker Compose v2
++ Bash + macOS (launchd, osascript, diskutil, Automator) + Make.
+Никаких Dockerfile и сборки из исходников.
+
+## Структура
+- `.env.example` — шаблон конфигурации (`.env` в .gitignore)
+- `docker-compose.yml` — стек, все значения через `${VAR:-default}`
+- `Makefile` — точка входа, тонкие обёртки над scripts/
+- `scripts/lib.sh` — общие функции (load_env, resolve_storage, dc, notify, die)
+- `scripts/{start,stop,update,install-automations}.sh`
+
+## Главное правило
+`UPLOAD_LOCATION`, `DB_VOLUME` и `DB_BACKUP_DIR` вычисляются в
+`resolve_storage()` из `STORAGE_TYPE` (local|ssd) и экспортируются в окружение —
+переменные окружения перекрывают `.env` при интерполяции Compose.
+Любой вызов `docker compose` обязан предваряться `load_env; resolve_storage`.
+
+## Критично: БД только в именованном томе
+PostgreSQL не работает на bind-mount в Docker Desktop на macOS (VirtioFS не
+сохраняет chown -> `data directory has wrong ownership`, база не создаётся).
+Сервис `database` монтирует `${DB_VOLUME}` (`immich_db_local`/`immich_db_ssd`).
+Не возвращать bind-mount. Перенос БД между режимами — только через
+`make backup-db` / `make restore-db`.
+
+## Валидация .env
+Через `load_env()`: наличие файла, `STORAGE_TYPE` ∈ {local, ssd},
+`DB_PASSWORD`, `DB_USERNAME`, `DB_DATABASE_NAME`. Пути — только абсолютные.
+Ошибки — только через `die()` (красный вывод + уведомление macOS + exit 1).
+
+## macOS
+- Пути для Docker — абсолютные, `~` не раскрывается.
+- Проверка тома: `mount | grep " on /Volumes/ИМЯ "`, не `[ -d ]`.
+- Перед `diskutil eject`: `docker compose down` + `sync`.
+- LaunchAgent `WatchPaths: /Volumes` ловит и монтирование, и отключение.
+- Регистрация горячих клавиш (`defaults write pbs`) — best-effort, не блокирует.
+
+## Запреты
+- `build:` в docker-compose.yml
+- хардкод путей, портов, лимитов вне `.env`
+- новый сервис без `deploy.resources.limits`
+- коммит `.env`, `library/`, `postgres/`
+- смена `DB_PASSWORD` после инициализации БД без пересоздания тома
+- bind-mount для каталога данных PostgreSQL
+
+## Проверка после правок
+```bash
+bash -n scripts/*.sh
+bash -c 'source scripts/lib.sh; load_env; resolve_storage; dc config'
+```

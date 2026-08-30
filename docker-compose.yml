@@ -1,0 +1,129 @@
+# ==========================================================================
+#  Immich — локальный медиасервер для macOS
+#
+#  Все значения берутся из .env. Правка .env или этого файла применяется
+#  командой `make restart` — пересборка образов НЕ нужна никогда.
+#
+#  UPLOAD_LOCATION и DB_VOLUME вычисляются в scripts/lib.sh на основе
+#  STORAGE_TYPE и экспортируются в окружение перед вызовом docker compose,
+#  поэтому переменные окружения перекрывают значения из .env.
+# ==========================================================================
+
+name: immich
+
+services:
+  # ---------------------------------------------------------------- сервер
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    env_file:
+      - .env
+    environment:
+      IMMICH_MACHINE_LEARNING_URL: http://immich-machine-learning:3003
+      # Внутри контейнера порт всегда 2283. IMMICH_PORT из .env управляет только
+      # маппингом наружу — иначе сервер начал бы слушать не тот порт.
+      IMMICH_PORT: 2283
+      # Потолок кучи Node.js — не даём процессу разрастаться в фоне
+      NODE_OPTIONS: --max-old-space-size=${SERVER_NODE_HEAP_MB:-1536}
+      # Ограничиваем пул потоков libuv (меньше параллельного I/O => меньше CPU)
+      UV_THREADPOOL_SIZE: ${SERVER_UV_THREADS:-2}
+    volumes:
+      - ${UPLOAD_LOCATION}:/data
+    ports:
+      - ${IMMICH_PORT:-2283}:2283
+    depends_on:
+      redis:
+        condition: service_healthy
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      disable: false
+    deploy:
+      resources:
+        limits:
+          cpus: ${SERVER_CPU_LIMIT:-2.0}
+          memory: ${SERVER_MEM_LIMIT:-2g}
+
+  # ------------------------------------------------------- machine learning
+  # Самый тяжёлый сервис. Нужен только для распознавания лиц и умного поиска.
+  # Если хочется совсем тихого фона — отключи его целиком:
+  #   docker compose stop immich-machine-learning
+  # (Immich продолжит работать, просто без ML-функций.)
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    env_file:
+      - .env
+    environment:
+      # 1 воркер = минимум ОЗУ и CPU
+      MACHINE_LEARNING_WORKERS: ${ML_WORKERS:-1}
+      MACHINE_LEARNING_REQUEST_THREADS: ${ML_REQUEST_THREADS:-1}
+      # Выгружать модель из памяти после простоя (сек) — освобождает ~1 ГБ ОЗУ
+      MACHINE_LEARNING_MODEL_TTL: ${ML_MODEL_TTL:-300}
+      MACHINE_LEARNING_MODEL_TTL_POLL_S: 30
+      # Ограничиваем внутренний параллелизм ONNX Runtime
+      OMP_NUM_THREADS: ${ML_WORKERS:-1}
+      MKL_NUM_THREADS: ${ML_WORKERS:-1}
+    volumes:
+      - model-cache:/cache
+    restart: unless-stopped
+    healthcheck:
+      disable: false
+    deploy:
+      resources:
+        limits:
+          cpus: ${ML_CPU_LIMIT:-2.0}
+          memory: ${ML_MEM_LIMIT:-2g}
+
+  # ----------------------------------------------------------------- redis
+  redis:
+    container_name: immich_redis
+    image: ${REDIS_IMAGE:-docker.io/valkey/valkey:8-bookworm}
+    healthcheck:
+      test: redis-cli ping || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: ${REDIS_CPU_LIMIT:-0.5}
+          memory: ${REDIS_MEM_LIMIT:-256m}
+
+  # -------------------------------------------------------------- postgres
+  database:
+    container_name: immich_postgres
+    image: ${DB_IMAGE:-ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0}
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_DB: ${DB_DATABASE_NAME}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    volumes:
+      # ВАЖНО: только именованный том. PostgreSQL не работает на bind-mount
+      # в Docker Desktop на macOS (VirtioFS не сохраняет chown ->
+      # "data directory has wrong ownership" и БД не инициализируется).
+      # Имя тома зависит от STORAGE_TYPE, поэтому local и ssd имеют
+      # независимые базы, согласованные со своими библиотеками.
+      # Бэкап БД на диск: make backup-db
+      - ${DB_VOLUME:-immich_db_local}:/var/lib/postgresql/data
+    shm_size: 128mb
+    healthcheck:
+      test: pg_isready -U "${DB_USERNAME}" -d "${DB_DATABASE_NAME}" || exit 1
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: ${DB_CPU_LIMIT:-1.0}
+          memory: ${DB_MEM_LIMIT:-1g}
+
+volumes:
+  model-cache:
+  immich_db_local:
+  immich_db_ssd:

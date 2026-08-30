@@ -1,0 +1,25 @@
+# Секреты и локальная конфигурация
+.env
+.env.local
+.env.*.local
+
+# Данные Immich (никогда не должны попадать в git)
+library/
+postgres/
+ImmichData/
+*.log
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Артефакты автоматизаций
+*.workflow/
+*.app/
+
+# Редакторы
+.idea/
+.vscode/
+*.swp
