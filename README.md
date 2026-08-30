@@ -1,63 +1,65 @@
-# 📸 Immich Home Media Server для macOS
+# 📸 Immich Home Media Server for macOS
 
-Личный медиасервер (аналог Google Photos) на твоём Mac. Фото и видео с iPhone
-загружаются автоматически, хранятся дома, доступны из любой точки мира.
+A personal media server (a Google Photos alternative) running on your Mac.
+Photos and videos from your iPhone are backed up automatically, stored at home,
+and reachable from anywhere.
 
-Особенности этой сборки:
+What makes this setup different:
 
-- **Гибридное хранилище** — одна переменная переключает библиотеку между диском
-  Mac и внешним SSD.
-- **Легковесность** — жёсткие лимиты CPU/RAM для всех контейнеров, ML-модель
-  выгружается из памяти после 5 минут простоя.
-- **Plug & Play** — подключил SSD → сервер поднялся сам. Горячие клавиши для
-  старта и безопасного извлечения диска.
-- **Без ручной сборки** — используются официальные образы, любое изменение
-  применяется через `make restart`.
+- **Hybrid storage** — a single variable switches the library between the Mac's
+  internal disk and an external SSD.
+- **Lightweight** — hard CPU/RAM limits on every container; the ML model is
+  unloaded from memory after 5 minutes of inactivity.
+- **Plug & Play** — connect the SSD and the server starts by itself. Hotkeys for
+  starting up and safely ejecting the drive.
+- **No manual builds** — official images only; any change is applied with
+  `make restart`.
 
 ---
 
-## 1. Что нужно установить
+## 1. Prerequisites
 
-| Что | Как |
+| What | How |
 |---|---|
-| Docker | [Docker Desktop](https://www.docker.com/products/docker-desktop/) или [OrbStack](https://orbstack.dev) (легче и быстрее) |
-| Xcode CLI Tools | `xcode-select --install` (даёт `git` и `make`) |
+| Docker | [Docker Desktop](https://www.docker.com/products/docker-desktop/) or [OrbStack](https://orbstack.dev) (lighter and faster — recommended) |
+| Xcode CLI Tools | `xcode-select --install` (provides `git` and `make`) |
 
-В настройках Docker Desktop выдели **4 CPU и 6 ГБ RAM** — этого хватает с запасом.
-В OrbStack ресурсы выделяются динамически, настраивать ничего не нужно.
+In Docker Desktop settings, allocate **4 CPUs and 6 GB RAM** — that is plenty.
+OrbStack allocates resources dynamically, so there is nothing to configure.
 
 ---
 
-## 2. Старт с нуля (5 минут)
+## 2. Start from scratch (5 minutes)
 
 ```bash
-git clone <адрес-репозитория> homelab && cd homelab
+git clone <repository-url> homelab && cd homelab
 cp .env.example .env
 ```
 
-Открой `.env` и поправь три вещи:
+Open `.env` and adjust three things:
 
 ```bash
-STORAGE_TYPE=local                                  # local или ssd
-LOCAL_STORAGE_PATH=/Users/ТВОЁ_ИМЯ/Pictures/ImmichData
-DB_PASSWORD=...                                     # новый: make secret
+STORAGE_TYPE=local                                  # local or ssd
+LOCAL_STORAGE_PATH=/Users/YOUR_NAME/Pictures/ImmichData
+DB_PASSWORD=...                                     # a fresh one: make secret
 ```
 
-> ⚠️ Пароль из `.env.example` лежит в репозитории. Сгенерируй свой командой
-> `make secret` и вставь в `DB_PASSWORD` **до первого запуска**: после
-> инициализации базы смена пароля потребует пересоздания тома.
+> ⚠️ The password in `.env.example` is public — it lives in the repository.
+> Generate your own with `make secret` and put it into `DB_PASSWORD`
+> **before the first start** (once the database is initialized, changing the
+> password requires recreating the volume).
 
-Проверь конфигурацию и запускай:
+Check the configuration and start:
 
 ```bash
 make doctor
 make start
 ```
 
-Первый запуск качает ~3 ГБ образов. Когда появится уведомление «Immich запущен»,
-открывай **http://localhost:2283** и создавай администратора.
+The first start downloads ~3 GB of images. When the "Immich запущен"
+notification appears, open **http://localhost:2283** and create the admin user.
 
-Затем поставь автоматизации macOS (один раз):
+Then install the macOS automations (once):
 
 ```bash
 make install
@@ -65,218 +67,191 @@ make install
 
 ---
 
-## 3. Подключение с iPhone
+## 3. Connecting from an iPhone
 
-### Дома, по Wi-Fi
+### At home, over Wi-Fi
 
-1. Установи приложение **Immich** из App Store.
-2. Узнай адрес Mac в сети: `make doctor` → строка `LAN-адрес`.
-3. В приложении введи **Server Endpoint URL**: `http://192.168.x.x:2283/api`
-4. Войди логином и паролем администратора, которого создал в веб-интерфейсе.
-5. `Настройки → Резервное копирование` → включи **Foreground/Background Backup**
-   и выбери альбомы для загрузки.
+1. Install the **Immich** app from the App Store.
+2. Find the Mac's address on the network: `make doctor` → the `LAN-адрес` line.
+3. In the app, enter the **Server Endpoint URL**: `http://192.168.x.x:2283/api`
+4. Sign in with your login and password.
+5. `Settings → Backup` → enable **Foreground/Background Backup** and pick the
+   albums to upload.
 
-> Чтобы адрес Mac не менялся, закрепи за ним статический IP в настройках
-> роутера (DHCP reservation).
+> To keep the Mac's address stable, reserve a static IP for it in your router
+> settings (DHCP reservation).
 
-### Вне дома, через Tailscale (бесплатно, без проброса портов)
+### Away from home, via Tailscale (free, no port forwarding)
 
-1. Поставь [Tailscale](https://tailscale.com) на Mac и на iPhone, войди под
-   одним аккаунтом.
-2. Узнай адрес Mac в сети Tailscale:
+1. Install [Tailscale](https://tailscale.com) on both the Mac and the iPhone and
+   sign in with the same account.
+2. Find the Mac's address inside the Tailscale network:
    ```bash
    tailscale ip -4
    ```
-3. В приложении Immich укажи `http://100.x.x.x:2283/api` — этот адрес работает
-   и дома, и в любой другой сети.
-4. Опционально включи в Tailscale **MagicDNS** и используй
-   `http://имя-мака.твоя-сеть.ts.net:2283/api`.
+3. In the Immich app, use `http://100.x.x.x:2283/api` — this address works both
+   at home and on any other network.
+4. Optionally enable **MagicDNS** in Tailscale and use
+   `http://your-mac.your-tailnet.ts.net:2283/api`.
 
-Mac должен быть включён и не спать. Отключи автосон:
-`Системные настройки → Аккумулятор → Параметры → Не давать компьютеру засыпать`.
+The Mac must stay powered on and awake. Disable automatic sleep:
+`System Settings → Battery → Options → Prevent automatic sleeping`.
 
 ---
 
-## 4. Переключение с локального Mac на SSD за 30 секунд
+## 4. Switching from the local Mac disk to an SSD in 30 seconds
 
 ```bash
-# 1. Сохранить базу и остановить сервер
-make backup-db
+# 1. Stop the server
 make stop
 
-# 2. Перенести библиотеку на SSD (один раз, зависит от объёма)
-rsync -avh --progress /Users/ТЫ/Pictures/ImmichData/ /Volumes/MySSD/ImmichData/
+# 2. Move the data to the SSD (once; duration depends on library size)
+rsync -avh --progress /Users/YOU/Pictures/ImmichData/ /Volumes/MySSD/ImmichData/
 
-# 3. В .env поменять три строки:
+# 3. Change two lines in .env:
 #    STORAGE_TYPE=ssd
 #    SSD_STORAGE_PATH=/Volumes/MySSD/ImmichData
-#    SSD_VOLUME_NAME=MySSD          <- имя тома ровно как в Finder
+#    SSD_VOLUME_NAME=MySSD          <- volume name exactly as shown in Finder
 
-# 4. Запустить и залить базу
+# 4. Start
 make start
-make restore-db FILE=/Volumes/MySSD/ImmichData/db-backup/immich-….sql.gz
-make restart
 ```
 
-Обратно на локальный диск — те же шаги с `STORAGE_TYPE=local` и обратным `rsync`.
+Going back to the internal disk is the same steps with `STORAGE_TYPE=local` and
+a reverse `rsync`.
 
-**Как это работает.** Скрипты сами вычисляют `UPLOAD_LOCATION` из `STORAGE_TYPE`
-и подставляют его в `docker-compose.yml`. В `.env` этот путь править не нужно.
+**How it works.** The scripts derive `UPLOAD_LOCATION` and `DB_DATA_LOCATION`
+from `STORAGE_TYPE` and pass them into `docker-compose.yml`. You never edit
+those paths in `.env` yourself.
 
-> ℹ️ **Почему база переносится отдельно.** PostgreSQL не умеет работать на
-> bind-mount в Docker Desktop на macOS: VirtioFS не сохраняет владельца файлов,
-> и сервер падает с `data directory has wrong ownership`. Поэтому база живёт в
-> именованном томе Docker — `immich_db_local` для режима `local` и
-> `immich_db_ssd` для `ssd`. Тома независимы, так что база и библиотека всегда
-> согласованы между собой. Переносится база дампом:
-> `make backup-db` → `make restore-db`. Шаг 4 можно пропустить, если в новом
-> режиме нужна пустая библиотека.
+### What happens with the SSD automatically
 
-### Что происходит с SSD автоматически
-
-- **Подключил кабель** → LaunchAgent видит новый том в `/Volumes` и вызывает
-  `start.sh`. Сервер поднимается сам.
-- **Хочешь отключить** → `⌃⌥⌘O` (или `make stop`): контейнеры гасятся, буферы
-  сбрасываются, диск извлекается через `diskutil eject`. Уведомление
-  «SSD извлечён» означает, что кабель можно тянуть.
-- **Выдернул кабель без остановки** → LaunchAgent замечает пропажу тома и
-  гасит контейнеры, чтобы не писать в никуда. Так лучше не делать.
-- **Пытаешься стартовать без диска** → красное уведомление с понятным текстом,
-  ничего не запускается.
+- **Plug the cable in** → the LaunchAgent notices the new volume in `/Volumes`
+  and calls `start.sh`. The server comes up on its own.
+- **Want to disconnect** → `⌃⌥⌘O` (or `make stop`): containers stop, buffers are
+  flushed, the disk is ejected via `diskutil eject`. The "SSD извлечён"
+  notification means the cable is safe to pull.
+- **Cable yanked without stopping** → the LaunchAgent sees the volume disappear
+  and shuts the containers down so the database does not write into nowhere.
+  Best avoided.
+- **Trying to start without the disk** → a red notification with a clear message;
+  nothing is started.
 
 ---
 
-## 5. Горячие клавиши и один клик
+## 5. Hotkeys and one-click launch
 
-| Действие | Комбинация | Альтернатива |
+| Action | Shortcut | Alternative |
 |---|---|---|
-| Запустить Immich | `⌃⌥⌘I` | `~/Applications/Immich Start.app` |
-| Остановить + извлечь SSD | `⌃⌥⌘O` | `~/Applications/Immich Stop.app` |
+| Start Immich | `⌃⌥⌘I` | `~/Applications/Immich Start.app` |
+| Stop + eject SSD | `⌃⌥⌘O` | `~/Applications/Immich Stop.app` |
 
-Ставятся командой `make install`. Если комбинация не сработала сразу:
-`Системные настройки → Клавиатура → Сочетания клавиш → Службы` — включи галочки
-у **Immich Start** и **Immich Stop** (иногда нужен перелогин).
+Installed by `make install`. If a shortcut does not work right away:
+`System Settings → Keyboard → Keyboard Shortcuts → Services` — tick the boxes for
+**Immich Start** and **Immich Stop** (a re-login is sometimes required).
 
-Оба `.app` можно перетащить в Dock, найти через Spotlight или добавить в
-приложение **Быстрые команды** (действие «Открыть приложение») и назначить там
-свою комбинацию.
+Both `.app` bundles can be dragged into the Dock, launched from Spotlight, or
+added to the **Shortcuts** app (the "Open App" action) with a custom key
+combination assigned there.
 
 ---
 
-## 6. Обновление
+## 6. Updating
 
 ```bash
 make update
 ```
 
-Скачивает свежие официальные образы, перезапускает стек, чистит старые слои и
-показывает уведомление с новой версией. Собирать ничего не нужно — Immich
-поставляется готовыми контейнерами.
+Pulls fresh official images, restarts the stack, cleans up old layers and shows a
+notification with the new version. There is nothing to build — Immich ships as
+ready-made containers.
 
 ---
 
-## 7. Все команды
+## 7. All commands
 
 ```
-make start       Запустить сервер
-make stop        Остановить (+ извлечь SSD в режиме ssd)
-make restart     Применить изменения .env / docker-compose.yml
-make update      Обновить Immich до последней версии
-make install     Установить автоматизации macOS
-make uninstall   Удалить автоматизации macOS
-make logs        Живые логи
-make ps          Состояние контейнеров
-make status      Потребление CPU / RAM
-make doctor      Проверить окружение и .env
-make backup-db   Дамп базы в <хранилище>/db-backup
-make restore-db  Восстановить базу: make restore-db FILE=…
-make shell-db    Консоль psql
-make secret      Сгенерировать пароль БД
-make prune       Удалить неиспользуемые образы
+make start      Start the server
+make stop       Stop it (+ eject the SSD in ssd mode)
+make restart    Apply changes to .env / docker-compose.yml
+make update     Update Immich to the latest version
+make install    Install the macOS automations
+make uninstall  Remove the macOS automations
+make logs       Live logs
+make ps         Container status
+make status     CPU / RAM usage
+make doctor     Check the environment and .env
+make shell-db   psql console
+make secret     Generate a database password
+make prune      Remove unused images
 ```
 
 ---
 
-## 8. Тонкая настройка нагрузки
+## 8. Performance tuning
 
-Правится в `.env`, применяется через `make restart`.
+Edited in `.env`, applied with `make restart`.
 
-| Переменная | По умолчанию | Что делает |
+| Variable | Default | What it does |
 |---|---|---|
-| `ML_CPU_LIMIT` / `ML_MEM_LIMIT` | `2.0` / `2g` | Потолок для распознавания лиц и умного поиска |
-| `ML_MODEL_TTL` | `300` | Через сколько секунд простоя выгрузить модель из RAM |
-| `ML_WORKERS` | `1` | Воркеров ML. Больше 1 — только если Mac мощный |
-| `SERVER_CPU_LIMIT` / `SERVER_MEM_LIMIT` | `2.0` / `2g` | Потолок для API и фоновых задач |
-| `SERVER_NODE_HEAP_MB` | `1536` | Потолок кучи Node.js |
-| `DB_CPU_LIMIT` / `DB_MEM_LIMIT` | `1.0` / `1g` | Потолок для PostgreSQL |
+| `ML_CPU_LIMIT` / `ML_MEM_LIMIT` | `2.0` / `2g` | Ceiling for face recognition and smart search |
+| `ML_MODEL_TTL` | `300` | Seconds of inactivity before the model is unloaded from RAM |
+| `ML_WORKERS` | `1` | ML workers. More than 1 only on a powerful Mac |
+| `SERVER_CPU_LIMIT` / `SERVER_MEM_LIMIT` | `2.0` / `2g` | Ceiling for the API and background jobs |
+| `SERVER_NODE_HEAP_MB` | `1536` | Node.js heap ceiling |
+| `DB_CPU_LIMIT` / `DB_MEM_LIMIT` | `1.0` / `1g` | Ceiling for PostgreSQL |
 
-**Если Mac всё равно шумит.** Основная нагрузка — фоновые задачи Immich.
-Зайди в веб-интерфейс → `Администрирование → Настройки → Задачи` и снизь
-Concurrency у `Thumbnail Generation`, `Video Conversion` и `Smart Search` до 1.
-Эти настройки живут в базе, а не в `.env`.
+**If the Mac is still noisy.** Most of the load comes from Immich background
+jobs. Go to the web UI → `Administration → Settings → Jobs` and lower the
+concurrency of `Thumbnail Generation`, `Video Conversion` and `Smart Search` to
+1. These settings live in the database, not in `.env`.
 
-**Совсем тихий режим** — выключить ML целиком (поиск по лицам и тексту
-перестанет работать, всё остальное останется):
+**Fully quiet mode** — disable ML entirely (face and text search stop working,
+everything else keeps running):
 
 ```bash
 docker compose stop immich-machine-learning
 ```
 
-Посмотреть реальное потребление: `make status`.
+To see actual consumption: `make status`.
 
 ---
 
-## 9. Если что-то пошло не так
+## 9. Troubleshooting
 
-| Симптом | Что делать |
+| Symptom | What to do |
 |---|---|
-| `Docker не запущен` | Открой Docker Desktop / OrbStack, дождись зелёного статуса |
-| `Внешний диск не подключён` | Подключи SSD или поставь `STORAGE_TYPE=local` в `.env` |
-| Не удалось извлечь диск | `make logs` покажет, кто держит файлы. Обычно помогает подождать 10 секунд и повторить `make stop` |
-| Веб не открывается | `make ps` — все ли контейнеры `healthy`. Первый старт базы занимает до 2 минут |
-| iPhone не видит сервер | Проверь, что телефон в той же Wi-Fi сети, и что в URL есть суффикс `/api` |
-| Порт 2283 занят | Поменяй `IMMICH_PORT` в `.env` и сделай `make restart` |
+| `Docker не запущен` | Open Docker Desktop / OrbStack and wait for the green status |
+| `Внешний диск не подключён` | Plug the SSD in, or set `STORAGE_TYPE=local` in `.env` |
+| The disk could not be ejected | `make logs` shows what is holding files. Waiting 10 seconds and repeating `make stop` usually helps |
+| The web UI does not open | `make ps` — are all containers `healthy`? The first database start can take up to 2 minutes |
+| The iPhone cannot see the server | Check that the phone is on the same Wi-Fi network and that the URL ends with `/api` |
+| Port 2283 is busy | Change `IMMICH_PORT` in `.env` and run `make restart` |
 
-Полный сброс (⚠️ удаляет всю библиотеку и базу):
+Full reset (⚠️ deletes the entire library):
 
 ```bash
 make stop
-docker volume rm immich_db_local immich_db_ssd
-rm -rf /путь/к/ImmichData
+rm -rf /path/to/ImmichData
 make start
 ```
 
 ---
 
-## 10. Резервные копии
+## 10. Backups
 
-Immich состоит из двух частей, и по отдельности они бесполезны:
+Immich keeps everything in two directories inside `STORAGE_ROOT`:
 
-| Что | Где лежит | Как бэкапить |
-|---|---|---|
-| Оригиналы фото и видео | `<хранилище>/library/` | `rsync` или Time Machine |
-| База (альбомы, лица, метаданные) | именованный том Docker | `make backup-db` |
+- `library/` — original photos and videos;
+- `postgres/` — the database (albums, faces, metadata).
 
-Регулярный бэкап — две команды, сервер останавливать не нужно:
+Copy **both** — either one alone is useless:
 
 ```bash
-make backup-db
+make stop
 rsync -avh --delete /Volumes/MySSD/ImmichData/ /Volumes/Backup/ImmichData/
-```
-
-Дамп кладётся внутрь `ImmichData`, поэтому `rsync` забирает и библиотеку, и базу
-одним проходом. Восстановление:
-
-```bash
 make start
-make restore-db FILE=/Volumes/Backup/ImmichData/db-backup/immich-….sql.gz
-make restart
 ```
 
-Чтобы дамп делался сам раз в сутки, добавь в `crontab -e`:
-
-```
-0 4 * * * cd /путь/к/homelab && /usr/bin/make backup-db >/dev/null 2>&1
-```
-
-Старые дампы не удаляются автоматически — чисти `db-backup/` руками.
+Time Machine works too, but exclude `postgres/` from hot backups — the database
+must only be copied while the containers are stopped.
