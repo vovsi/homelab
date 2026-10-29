@@ -9,7 +9,7 @@ define DC
 	@bash -c 'source scripts/lib.sh; load_env; resolve_storage; dc $(1)'
 endef
 
-.PHONY: help start stop restart update logs ps status install uninstall doctor shell-db prune secret backup-db restore-db
+.PHONY: help start stop restart update logs ps status install uninstall doctor watch-log shell-db prune secret backup-db restore-db
 
 help: ## Показать список команд
 	@echo "Immich Home Media Server"
@@ -20,7 +20,7 @@ help: ## Показать список команд
 start: ## Запустить сервер
 	@./scripts/start.sh
 
-stop: ## Остановить сервер (+ извлечь SSD в режиме ssd)
+stop: ## Остановить сервер (дамп БД + извлечь диск в режиме ssd)
 	@./scripts/stop.sh
 
 restart: ## Применить изменения .env / docker-compose.yml
@@ -60,7 +60,13 @@ doctor: ## Проверить окружение и .env
 			mount | grep -q " on $$v " && echo "SSD              : смонтирован ($$v)" || echo "SSD              : НЕ подключён ($$v)"; \
 		fi; \
 		[[ -d "$$UPLOAD_LOCATION" ]] && echo "Библиотека       : существует" || echo "Библиотека       : будет создана при старте"; \
+		launchctl list 2>/dev/null | grep -q com.homelab.immich.volumewatch \
+			&& echo "Автозапуск       : загружен" || echo "Автозапуск       : не установлен (make install)"; \
+		[[ -f "$$PAUSE_FILE" ]] && echo "Пауза            : стоит — watcher не поднимает стек (снимется при переподключении диска или make start)" || true; \
 		echo "Docker           : ок"'
+
+watch-log: ## Лог автозапуска по подключению диска
+	@tail -n 50 "$$HOME/Library/Application Support/immich-homelab/watch.log" 2>/dev/null || echo "Лога пока нет"
 
 prune: ## Удалить неиспользуемые образы Docker
 	@docker image prune -f
@@ -68,11 +74,9 @@ prune: ## Удалить неиспользуемые образы Docker
 secret: ## Сгенерировать новый пароль БД (перед первым запуском)
 	@openssl rand -base64 24 | tr -d '/+=' | cut -c1-28
 
-backup-db: ## Дамп БД в <хранилище>/db-backup (делать регулярно!)
+backup-db: ## Дамп БД в <хранилище>/db-backup (make stop делает его сам)
 	@bash -c 'source scripts/lib.sh; load_env; resolve_storage; require_docker; \
-		mkdir -p "$$DB_BACKUP_DIR"; \
-		f="$$DB_BACKUP_DIR/immich-$$(date +%Y%m%d-%H%M%S).sql.gz"; \
-		dc exec -T database pg_dumpall --clean --if-exists -U "$$DB_USERNAME" | gzip > "$$f"; \
+		f="$$(backup_db)" || { echo "❌ Дамп не удался (стек запущен? диск на месте?)"; exit 1; }; \
 		echo "✅ $$f ($$(du -h "$$f" | cut -f1))"'
 
 restore-db: ## Восстановить БД из дампа: make restore-db FILE=путь.sql.gz

@@ -18,7 +18,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 AGENT_LABEL="com.homelab.immich.volumewatch"
 AGENT_PLIST="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
-SUPPORT_DIR="${HOME}/Library/Application Support/immich-homelab"
+SUPPORT_DIR="${STATE_DIR}"   # задан в lib.sh
 WATCHER="${SUPPORT_DIR}/volume-watch.sh"
 APPS_DIR="${HOME}/Applications"
 SERVICES_DIR="${HOME}/Library/Services"
@@ -54,9 +54,17 @@ install_agent() {
   cat > "${WATCHER}" <<WEOF
 #!/usr/bin/env bash
 # Автогенерируется scripts/install-automations.sh — правки будут перезаписаны.
-# Срабатывает при любом изменении в /Volumes (подключение/отключение диска).
+# Запускается launchd: при любом изменении в /Volumes (подключение или
+# отключение диска), при входе в систему и раз в несколько минут —
+# чтобы стек сам восстановился после сна, перезагрузки или ручной остановки
+# Docker Desktop.
 PROJECT_DIR="${PROJECT_DIR}"
 source "\${PROJECT_DIR}/scripts/lib.sh"
+
+# TZ в .env задан для контейнеров Immich — в логе watcher'а нужно системное
+# время, иначе метки расходятся с системным журналом.
+log() { printf '%s  %s\n' "\$(unset TZ; date '+%Y-%m-%d %H:%M:%S')" "\$*"; }
+
 load_env
 resolve_storage
 
@@ -64,15 +72,75 @@ resolve_storage
 [[ "\${STORAGE_TYPE}" == "ssd" ]] || exit 0
 
 VOL="\$(ssd_volume_path)"
-command -v docker >/dev/null 2>&1 || exit 0
-docker info >/dev/null 2>&1 || exit 0
 
-if mount | grep -q " on \${VOL} "; then
-  # Диск на месте — поднимаем, если ещё не подняты
-  stack_running || "\${PROJECT_DIR}/scripts/start.sh" --if-ssd-present
+# На одно подключение прилетает несколько событий — обрабатываем по одному.
+# Ждём освободившийся lock, а не выходим молча: иначе событие о подключении
+# диска можно потерять целиком.
+with_lock 60 || { log "другой экземпляр watcher ещё работает — пропускаю"; exit 0; }
+
+mkdir -p "\${STATE_DIR}"
+PREV="\$(cat "\${MOUNT_STATE_FILE}" 2>/dev/null || echo 0)"
+
+# Диск считается доступным, только если том смонтирован И отвечает на чтение.
+# Запись в mount без отклика на I/O — это отвалившийся по шине диск: с точки
+# зрения контейнеров он мёртв (/data отдаёт "Bad file descriptor"), поэтому
+# обрабатывается так же, как физическое отключение.
+AVAILABLE=0
+REASON="том не смонтирован"
+
+# Событие от launchd прилетает в момент появления записи в /Volumes, то есть
+# РАНЬШЕ, чем том реально смонтирован. Если в прошлый раз диска не было, это
+# ожидание подключения — даём тому домонтироваться. Если был (PREV=1), это
+# отключение: ждать нечего, гасим сразу.
+MOUNTED=0
+if [[ "\${PREV}" == "1" ]]; then
+  volume_mounted "\${VOL}" && MOUNTED=1
+elif [[ -d "\${VOL}" ]]; then
+  # Директория в /Volumes уже создана, записи в mount ещё нет — ждём.
+  # Холостые тики по таймеру сюда не попадают и ничего не ждут.
+  wait_for_volume "\${VOL}" "\${VOLUME_WAIT_TIMEOUT:-30}" && MOUNTED=1
+fi
+
+if (( MOUNTED )); then
+  if volume_responsive "\${VOL}" "\${VOLUME_IO_TIMEOUT:-15}"; then
+    AVAILABLE=1
+  else
+    # Вторая попытка: HDD мог просто просыпаться из парковки
+    volume_responsive "\${VOL}" "\${VOLUME_IO_TIMEOUT:-15}" \
+      && AVAILABLE=1 \
+      || REASON="том смонтирован, но не отвечает на I/O"
+  fi
+fi
+
+if (( AVAILABLE )); then
+  echo 1 > "\${MOUNT_STATE_FILE}"
+
+  # Диск только что воткнули — это явное намерение работать, поэтому
+  # снимаем ручную паузу, поставленную ранее через 'make stop'.
+  [[ "\${PREV}" == "1" ]] || rm -f "\${PAUSE_FILE}"
+
+  if [[ -f "\${PAUSE_FILE}" ]]; then
+    log "диск на месте, но стоит ручная пауза — не поднимаю"
+    exit 0
+  fi
+
+  stack_running && exit 0
+
+  log "диск \${VOL} доступен — поднимаю Immich"
+  ensure_docker "\${DOCKER_WAIT_TIMEOUT:-240}"
+  "\${PROJECT_DIR}/scripts/start.sh" --if-ssd-present
 else
-  # Диск исчез — гасим контейнеры, чтобы не писать в пустоту
+  # Состояние не изменилось и диска по-прежнему нет — выходим до обращения
+  # к Docker: иначе тик раз в минуту впустую дёргает docker compose ps.
+  [[ "\${PREV}" == "0" ]] && exit 0
+
+  echo 0 > "\${MOUNT_STATE_FILE}"
+
+  # Docker не запущен — гасить нечего и будить его незачем
+  docker info >/dev/null 2>&1 || exit 0
+
   if stack_running; then
+    log "диск \${VOL} недоступен (\${REASON}) — гашу Immich"
     dc down --remove-orphans >/dev/null 2>&1 || true
     notify "Immich остановлен" "Внешний диск отключён"
   fi
@@ -98,6 +166,8 @@ WEOF
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <key>StartInterval</key>
+    <integer>${WATCH_INTERVAL:-300}</integer>
     <key>ThrottleInterval</key>
     <integer>15</integer>
     <key>ProcessType</key>
@@ -118,7 +188,7 @@ PEOF
     || launchctl load -w "${AGENT_PLIST}" 2>/dev/null \
     || c_ylw "⚠️  LaunchAgent не удалось загрузить автоматически (загрузится после перелогина)"
 
-  c_grn "✅ LaunchAgent установлен — Immich стартует сам при подключении SSD"
+  c_grn "✅ LaunchAgent установлен — Immich стартует сам при подключении диска"
 }
 
 # ==========================================================================
@@ -303,7 +373,7 @@ cat <<TXT
   • Приложения ~/Applications/Immich Start.app и Immich Stop.app можно
     перетащить в Dock или добавить в приложение «Быстрые команды»
     (действие «Открыть приложение») и назначить там свою комбинацию.
-  • Автозапуск при подключении SSD работает только при STORAGE_TYPE=ssd.
+  • Автозапуск при подключении диска работает только при STORAGE_TYPE=ssd.
     Лог слежения: ${SUPPORT_DIR}/watch.log
 
 Удалить всё:  ./scripts/install-automations.sh --uninstall

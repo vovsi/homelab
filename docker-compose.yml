@@ -28,7 +28,14 @@ services:
       # Ограничиваем пул потоков libuv (меньше параллельного I/O => меньше CPU)
       UV_THREADPOOL_SIZE: ${SERVER_UV_THREADS:-2}
     volumes:
-      - ${UPLOAD_LOCATION}:/data
+      # create_host_path: false — если диск не смонтирован, контейнер НЕ
+      # стартует вместо того, чтобы молча создать пустую директорию
+      # и писать библиотеку на системный диск мимо внешнего носителя.
+      - type: bind
+        source: ${UPLOAD_LOCATION}
+        target: /data
+        bind:
+          create_host_path: false
     ports:
       - ${IMMICH_PORT:-2283}:2283
     depends_on:

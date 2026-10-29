@@ -1,7 +1,7 @@
 # CLAUDE.md — контекст проекта для LLM
 
 Локальный медиасервер Immich на macOS с гибридным хранилищем
-(диск Mac ↔ внешний SSD) и автоматизациями macOS.
+(диск Mac ↔ внешний диск, отданный под облако целиком) и автоматизациями macOS.
 
 ## Стек
 
@@ -25,7 +25,7 @@ docker-compose.yml        стек, все значения через ${...}
 Makefile                  make start/stop/restart/update/install/doctor/...
 scripts/lib.sh            общие функции, source во всех скриптах
 scripts/start.sh          валидация → создание директорий → up -d → уведомление
-scripts/stop.sh           down → sync → diskutil eject (только STORAGE_TYPE=ssd)
+scripts/stop.sh           дамп БД → down → sync → diskutil eject (только ssd)
 scripts/update.sh         pull → up -d → prune → уведомление с версией
 scripts/install-automations.sh  LaunchAgent + .app + Quick Actions (+ --uninstall)
 ```
@@ -80,13 +80,30 @@ PostgreSQL **не работает на bind-mount в Docker Desktop на macOS*
 ## Особенности macOS
 
 - Пути в Docker — только абсолютные, `~` не раскрывается. Тильда в `.env` = баг.
-- Том определяется через `mount | grep " on /Volumes/ИМЯ "`, а не `[ -d ]`:
-  директория `/Volumes/ИМЯ` может остаться после отключения диска.
+- Том определяется через `mount | grep " on /Volumes/ИМЯ "` (`volume_mounted()`),
+  а не `[ -d ]`: директория `/Volumes/ИМЯ` может остаться после отключения диска,
+  а `ls` по ней при этом отдаёт `Permission denied` / `No such file`.
+- **Внешний диск — только APFS.** На macOS 26 exFAT монтируется через FSKit
+  (`mount` показывает флаги `noowners, fskit`): нет POSIX-владельцев и симлинков,
+  bind-mount в Docker по нему отдаёт `I/O error`. Проверено на этом проекте.
+- Bind-mount библиотеки объявлен с `bind.create_host_path: false`. Это
+  принципиально: иначе при отсутствующем диске Docker молча создаст пустой
+  `/Volumes/<том>` и начнёт писать библиотеку на системный диск, заодно
+  заблокировав монтирование настоящего тома. Не убирать.
 - Перед `diskutil eject` обязательны `docker compose down` + `sync` — иначе
   «Resource busy». Диагностика занятости — `lsof +D`.
-- LaunchAgent использует `WatchPaths: /Volumes`. Событие приходит и на
-  монтирование, и на размонтирование, поэтому watcher сам решает,
-  поднимать стек или гасить. `ThrottleInterval` защищает от дребезга.
+- LaunchAgent использует `WatchPaths: /Volumes` + `RunAtLoad` + `StartInterval`.
+  Событие приходит и на монтирование, и на размонтирование, поэтому watcher сам
+  решает, поднимать стек или гасить; `StartInterval` — самопочинка после сна и
+  перезагрузки. `ThrottleInterval` защищает от дребезга, `with_lock` — от
+  параллельных запусков (на одно подключение событий прилетает несколько).
+- Docker Desktop watcher поднимает сам (`ensure_docker` → `open -ga Docker` и
+  ожидание демона), поэтому автозапуск Docker при логине включать не нужно:
+  без диска контейнеры и не понадобятся.
+- Ручная остановка (`stop.sh --no-eject`, то есть и `make restart`) ставит
+  флаг `~/Library/Application Support/immich-homelab/paused`, чтобы watcher не
+  поднял стек обратно. Снимается `start.sh` и новым монтированием тома —
+  watcher сравнивает текущее состояние с `last-mount-state`.
 - Горячие клавиши Quick Actions регистрируются через
   `defaults write pbs NSServicesStatus` + `pbs -flush`. Это best-effort:
   на части систем требуется ручное включение в Системных настройках.
@@ -106,8 +123,10 @@ PostgreSQL **не работает на bind-mount в Docker Desktop на macOS*
 4. **Все скрипты** начинаются с `source .../lib.sh` (там `set -euo pipefail`),
    поддерживают запуск из любой директории (`PROJECT_DIR`), сообщают об успехе
    и об ошибке уведомлением.
-5. **БД переносится только дампом.** `make backup-db` кладёт `pg_dumpall | gzip`
-   в `$STORAGE_ROOT/db-backup`. Копирование каталога тома руками не поддерживается.
+5. **БД переносится только дампом.** `backup_db()` в `lib.sh` кладёт
+   `pg_dumpall | gzip` в `$STORAGE_ROOT/db-backup` и ротирует до
+   `DB_BACKUP_KEEP` файлов; его дёргают `make backup-db` и `stop.sh`.
+   Копирование каталога тома руками не поддерживается.
 6. **Секреты не коммитить.** `.env`, `library/`, `postgres/` — в `.gitignore`.
    Пароль в `.env.example` — заведомо публичный, README требует `make secret`.
 7. **Смена `DB_PASSWORD` после инициализации** ломает БД: пароль зашит в том
@@ -124,6 +143,7 @@ make install        # автоматизации macOS
 make uninstall      # снять автоматизации
 make doctor         # диагностика окружения и путей
 make backup-db      # дамп БД в $STORAGE_ROOT/db-backup
+make watch-log      # лог автозапуска по подключению диска
 make restore-db FILE=...  # восстановление БД из дампа
 make logs / ps / status
 make secret         # новый пароль БД

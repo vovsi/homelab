@@ -7,11 +7,12 @@ and reachable from anywhere.
 What makes this setup different:
 
 - **Hybrid storage** — a single variable switches the library between the Mac's
-  internal disk and an external SSD.
+  internal disk and an external drive, which is used in full as the cloud.
 - **Lightweight** — hard CPU/RAM limits on every container; the ML model is
   unloaded from memory after 5 minutes of inactivity.
-- **Plug & Play** — connect the SSD and the server starts by itself. Hotkeys for
-  starting up and safely ejecting the drive.
+- **Plug & Play** — connect the drive and the server starts by itself: the
+  LaunchAgent waits for the volume, launches Docker Desktop if it is not running
+  and brings the stack up. Hotkeys for starting up and safely ejecting the drive.
 - **No manual builds** — official images only; any change is applied with
   `make restart`.
 
@@ -39,10 +40,16 @@ cp .env.example .env
 Open `.env` and adjust three things:
 
 ```bash
-STORAGE_TYPE=local                                  # local or ssd
-LOCAL_STORAGE_PATH=/Users/YOUR_NAME/Pictures/ImmichData
+STORAGE_TYPE=ssd                                    # local or ssd
+SSD_STORAGE_PATH=/Volumes/External                  # the whole drive is the cloud
+SSD_VOLUME_NAME=External                            # volume name exactly as in Finder
 DB_PASSWORD=...                                     # a fresh one: make secret
 ```
+
+> ⚠️ **Format the external drive as APFS** (Disk Utility → Erase → APFS, GUID
+> partition map). On macOS 26 an exFAT volume is mounted through FSKit with no
+> POSIX ownership and no symlinks; Docker bind mounts on it are slow and
+> unreliable. APFS gives normal permissions and native speed.
 
 > ⚠️ The password in `.env.example` is public — it lives in the repository.
 > Generate your own with `make secret` and put it into `DB_PASSWORD`
@@ -99,43 +106,56 @@ The Mac must stay powered on and awake. Disable automatic sleep:
 
 ---
 
-## 4. Switching from the local Mac disk to an SSD in 30 seconds
+## 4. The external drive as the cloud
+
+`SSD_STORAGE_PATH` points at the **root of the volume** — the drive is used in
+full. The scripts lay out two directories there:
+
+```
+/Volumes/External/library      originals, thumbnails, Immich's own structure
+/Volumes/External/db-backup    database dumps (the last DB_BACKUP_KEEP ones)
+```
+
+The PostgreSQL data directory is **not** on the drive: on macOS it lives in a
+Docker named volume (`immich_db_ssd`), because postgres refuses to start on a
+bind mount under Docker Desktop. That is why `make stop` dumps the database onto
+the drive first — the library plus the latest dump is a complete backup.
+
+Switching from the local Mac disk (once, with a library already in place):
 
 ```bash
-# 1. Stop the server
 make stop
-
-# 2. Move the data to the SSD (once; duration depends on library size)
-rsync -avh --progress /Users/YOU/Pictures/ImmichData/ /Volumes/MySSD/ImmichData/
-
-# 3. Change two lines in .env:
-#    STORAGE_TYPE=ssd
-#    SSD_STORAGE_PATH=/Volumes/MySSD/ImmichData
-#    SSD_VOLUME_NAME=MySSD          <- volume name exactly as shown in Finder
-
-# 4. Start
+rsync -avh --progress /Users/YOU/Pictures/ImmichData/library/ /Volumes/External/library/
+# in .env: STORAGE_TYPE=ssd, SSD_STORAGE_PATH=/Volumes/External, SSD_VOLUME_NAME=External
 make start
 ```
 
-Going back to the internal disk is the same steps with `STORAGE_TYPE=local` and
-a reverse `rsync`.
+The `local` and `ssd` modes have **independent databases** (separate named
+volumes), so an existing library is carried over with
+`make backup-db` → `make restore-db FILE=...`, not by copying volume directories.
 
-**How it works.** The scripts derive `UPLOAD_LOCATION` and `DB_DATA_LOCATION`
-from `STORAGE_TYPE` and pass them into `docker-compose.yml`. You never edit
-those paths in `.env` yourself.
+### What happens with the drive automatically
 
-### What happens with the SSD automatically
-
-- **Plug the cable in** → the LaunchAgent notices the new volume in `/Volumes`
-  and calls `start.sh`. The server comes up on its own.
-- **Want to disconnect** → `⌃⌥⌘O` (or `make stop`): containers stop, buffers are
-  flushed, the disk is ejected via `diskutil eject`. The "SSD извлечён"
-  notification means the cable is safe to pull.
+- **Plug the cable in** → the LaunchAgent sees the new volume in `/Volumes`,
+  waits for it to mount, starts Docker Desktop if needed and calls `start.sh`.
+  Open `http://localhost:2283` and the gallery is there.
+- **Want to disconnect** → `⌃⌥⌘O` (or `make stop`): the database is dumped onto
+  the drive, containers stop, buffers are flushed and the disk is ejected via
+  `diskutil eject`. The "Диск извлечён" notification means the cable is safe to
+  pull.
 - **Cable yanked without stopping** → the LaunchAgent sees the volume disappear
-  and shuts the containers down so the database does not write into nowhere.
-  Best avoided.
-- **Trying to start without the disk** → a red notification with a clear message;
-  nothing is started.
+  and shuts the containers down. The library survives (Immich writes files
+  atomically), but the newest database changes may be lost — avoid this.
+- **Starting without the drive** → nothing comes up. `immich-server` is bound to
+  the library with `create_host_path: false`, so Docker refuses to start it
+  rather than silently creating an empty folder and writing to the Mac's disk.
+- **Stack stopped by hand** (`make restart`, `make stop --no-eject`) → a pause
+  flag is set and the watcher leaves it alone. The flag is cleared by `make
+  start` or by replugging the drive.
+- **Self-healing** → besides `/Volumes` events the watcher also runs at login and
+  every `WATCH_INTERVAL` seconds, so the stack comes back after a reboot or sleep.
+
+Watcher log: `make watch-log`.
 
 ---
 
@@ -181,9 +201,12 @@ make logs       Live logs
 make ps         Container status
 make status     CPU / RAM usage
 make doctor     Check the environment and .env
+make watch-log  Auto-start watcher log
 make shell-db   psql console
 make secret     Generate a database password
 make prune      Remove unused images
+make backup-db  Dump the database to <storage>/db-backup
+make restore-db Restore the database: make restore-db FILE=...
 ```
 
 ---
@@ -227,6 +250,9 @@ To see actual consumption: `make status`.
 | The web UI does not open | `make ps` — are all containers `healthy`? The first database start can take up to 2 minutes |
 | The iPhone cannot see the server | Check that the phone is on the same Wi-Fi network and that the URL ends with `/api` |
 | Port 2283 is busy | Change `IMMICH_PORT` in `.env` and run `make restart` |
+| The drive keeps disappearing from `/Volumes` | A bus-powered HDD browning out: plug it straight into the Mac, not through a hub, and try another cable. Check with `diskutil list external` |
+| `I/O error` when the container writes to the drive | Either the volume dropped off the bus, or it is still exFAT. Reformat as APFS |
+| Nothing starts after plugging the drive in | `make watch-log`; `make doctor` shows whether the LaunchAgent is loaded and whether a manual pause is set |
 
 Full reset (⚠️ deletes the entire library):
 
@@ -240,18 +266,30 @@ make start
 
 ## 10. Backups
 
-Immich keeps everything in two directories inside `STORAGE_ROOT`:
+Two things make up a complete backup, and neither is useful alone:
 
-- `library/` — original photos and videos;
-- `postgres/` — the database (albums, faces, metadata).
+- `library/` on the drive — originals, thumbnails, Immich's own layout;
+- a database dump in `db-backup/` — albums, faces, metadata.
 
-Copy **both** — either one alone is useless:
+`make stop` writes a fresh dump automatically and keeps the last
+`DB_BACKUP_KEEP` of them. On demand:
 
 ```bash
-make stop
-rsync -avh --delete /Volumes/MySSD/ImmichData/ /Volumes/Backup/ImmichData/
+make backup-db
+```
+
+Copying the whole drive elsewhere:
+
+```bash
+make backup-db
+make stop --no-eject
+rsync -avh --delete /Volumes/External/ /Volumes/Backup/Immich/
 make start
 ```
 
-Time Machine works too, but exclude `postgres/` from hot backups — the database
-must only be copied while the containers are stopped.
+Restoring onto a clean install: put `library/` back in place, start the stack and
+run `make restore-db FILE=/Volumes/External/db-backup/immich-….sql.gz`.
+
+Time Machine can back the drive up as well — `library/` and `db-backup/` are
+ordinary files. The database itself is not on the drive, so there is nothing
+there that must not be copied hot.
